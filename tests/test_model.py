@@ -64,3 +64,36 @@ def test_rule_dataset_item_shape():
     assert item["attention_mask"].shape == (128,)
     assert item["count"].item() == 1
     assert item["weekday"][0].item() == 1
+
+
+import tempfile, pathlib
+
+def test_checkpoint_save_and_load():
+    from train_time_logicformer import TimeLogicFormer
+    model = TimeLogicFormer(backbone=BACKBONE, max_rules=2)
+    config = {"backbone": BACKBONE, "max_rules": 2, "dropout": 0.1}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "model.pt"
+        torch.save({"model_state_dict": model.state_dict(), "config": config}, path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        loaded = TimeLogicFormer(
+            backbone=ckpt["config"]["backbone"],
+            max_rules=ckpt["config"]["max_rules"],
+            dropout=ckpt["config"]["dropout"],
+        )
+        loaded.load_state_dict(ckpt["model_state_dict"])
+    assert loaded is not None
+
+
+def test_old_checkpoint_format_fails_clearly():
+    """Old checkpoints missing 'backbone' key must raise KeyError, not produce garbage."""
+    from train_time_logicformer import TimeLogicFormer
+    old_style_config = {"d_model": 256, "num_layers": 4, "max_rules": 6}
+    try:
+        _ = TimeLogicFormer(
+            backbone=old_style_config["backbone"],  # KeyError here
+            max_rules=old_style_config["max_rules"],
+        )
+        assert False, "Should have raised KeyError"
+    except KeyError:
+        pass

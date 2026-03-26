@@ -358,8 +358,7 @@ def train(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
     train_rows, valid_rows = split_rows(rows, args.valid_ratio, rng)
 
-    tokenizer = CharTokenizer(vocab_size=args.vocab_size, max_len=args.max_len)
-    tokenizer.fit([x["text"] for x in train_rows])
+    tokenizer = AutoTokenizer.from_pretrained(args.backbone)
 
     train_ds = RuleDataset(train_rows, tokenizer, max_rules=args.max_rules)
     valid_ds = RuleDataset(valid_rows, tokenizer, max_rules=args.max_rules)
@@ -369,16 +368,18 @@ def train(args: argparse.Namespace) -> None:
 
     device = choose_device(args.device)
     model = TimeLogicFormer(
-        vocab_size=args.vocab_size,
-        d_model=args.hidden_dim,
-        nhead=args.num_heads,
-        num_layers=args.num_layers,
-        dim_ff=args.ff_dim,
-        max_len=args.max_len,
-        dropout=args.dropout,
+        backbone=args.backbone,
         max_rules=args.max_rules,
+        dropout=args.dropout,
     ).to(device)
-    optimizer = AdamW(model.parameters(), lr=args.lr)
+
+    backbone_params = list(model.backbone_model.parameters())
+    head_params = [p for p in model.parameters() if not any(p is bp for bp in backbone_params)]
+    optimizer = AdamW([
+        {"params": backbone_params, "lr": args.encoder_lr},
+        {"params": head_params, "lr": args.lr},
+    ])
+
     total_steps = max(1, args.epochs * max(1, len(train_loader)))
     warmup_steps = int(total_steps * args.warmup_ratio)
 
@@ -392,9 +393,8 @@ def train(args: argparse.Namespace) -> None:
 
     best_valid = float("inf")
     best_path = out_dir / "best_model.pt"
-    tokenizer_path = out_dir / "tokenizer.json"
 
-    print(f"device={device.type} train_samples={len(train_rows)} valid_samples={len(valid_rows)}")
+    print(f"device={device.type} backbone={args.backbone} train={len(train_rows)} valid={len(valid_rows)}")
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -412,13 +412,7 @@ def train(args: argparse.Namespace) -> None:
             total += float(loss.item())
             batches += 1
         train_loss = total / max(1, batches)
-        valid_loss = evaluate(
-            model,
-            valid_loader,
-            device,
-            max_rules=args.max_rules,
-            label_smoothing=args.label_smoothing,
-        )
+        valid_loss = evaluate(model, valid_loader, device, max_rules=args.max_rules, label_smoothing=args.label_smoothing)
         print(f"epoch={epoch} train_loss={train_loss:.4f} valid_loss={valid_loss:.4f}")
         if valid_loss < best_valid:
             best_valid = valid_loss
@@ -426,25 +420,16 @@ def train(args: argparse.Namespace) -> None:
                 {
                     "model_state_dict": model.state_dict(),
                     "config": {
-                        "vocab_size": args.vocab_size,
-                        "d_model": args.hidden_dim,
-                        "nhead": args.num_heads,
-                        "num_layers": args.num_layers,
-                        "dim_ff": args.ff_dim,
-                        "max_len": args.max_len,
-                        "dropout": args.dropout,
+                        "backbone": args.backbone,
                         "max_rules": args.max_rules,
+                        "dropout": args.dropout,
                     },
                 },
                 best_path,
             )
 
-    with tokenizer_path.open("w", encoding="utf-8") as f:
-        json.dump({"max_len": args.max_len, "char2id": tokenizer.char2id}, f, ensure_ascii=False)
-
     print(f"best_valid_loss={best_valid:.4f}")
     print(f"saved_model={best_path}")
-    print(f"saved_tokenizer={tokenizer_path}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -453,22 +438,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--data", type=str, default="synthetic_blacklist.jsonl")
     p.add_argument("--eval-data", type=str, default="")
     p.add_argument("--checkpoint", type=str, default="")
-    p.add_argument("--tokenizer-path", type=str, default="")
     p.add_argument("--out-dir", type=str, default="artifacts")
     p.add_argument("--device", type=str, choices=["auto", "mps", "cpu", "cuda"], default="auto")
-    p.add_argument("--epochs", type=int, default=24)
-    p.add_argument("--batch-size", type=int, default=128)
+    p.add_argument("--backbone", type=str, default="sentence-transformers/all-MiniLM-L6-v2")
+    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--encoder-lr", type=float, default=2e-5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--valid-ratio", type=float, default=0.1)
-    p.add_argument("--vocab-size", type=int, default=7000)
-    p.add_argument("--max-len", type=int, default=120)
-    p.add_argument("--hidden-dim", type=int, default=256)
-    p.add_argument("--num-layers", type=int, default=4)
-    p.add_argument("--num-heads", type=int, default=4)
-    p.add_argument("--ff-dim", type=int, default=768)
-    p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--max-rules", type=int, default=6)
+    p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--warmup-ratio", type=float, default=0.06)
