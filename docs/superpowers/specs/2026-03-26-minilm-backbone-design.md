@@ -21,8 +21,8 @@ The current TimeLogicFormer fails across all error modes — wrong weekday, wron
 | Tokenizer | `CharTokenizer` (char-level, vocab 7000) | HuggingFace `AutoTokenizer` from `all-MiniLM-L6-v2` (BPE, ~30K vocab) |
 | Encoder | From-scratch `TransformerEncoder` (4 layers, d_model=256) | Pretrained `AutoModel` from `all-MiniLM-L6-v2` (6 layers, hidden=384, ~22MB) |
 | Positional encoding | `SinusoidalPositionalEncoding` | Removed — baked into pretrained model |
-| Pooling | Masked mean pool | Mean pool of last hidden states (same behaviour) |
-| Classification heads | Linear heads off 256-dim | Same heads off 384-dim |
+| Pooling | Masked mean pool | Masked mean pool of last hidden states (attention_mask applied, same logic) |
+| Classification heads | Linear heads off 256-dim | New randomly-initialized Linear heads off 384-dim |
 
 ### What stays the same
 
@@ -53,6 +53,8 @@ Removed (unused with pretrained backbone): `--hidden-dim`, `--num-layers`, `--nu
 ### Checkpoint format
 
 Saves `model_state_dict` + `config` dict. Config stores `backbone` (model ID string) instead of layer/dim params. All consumers (`evaluate_effectiveness`, `simple_ui_server.py`) reconstruct model from `config["backbone"]`.
+
+Old checkpoints (with `d_model`/`num_layers` keys instead of `backbone`) are not compatible. Loading one raises a `KeyError` on `config["backbone"]` — this is the intended behaviour (fail clearly, not silently). No migration path is provided.
 
 ---
 
@@ -98,12 +100,17 @@ Smaller batch size (64 vs 128) — MiniLM hidden states use more memory than cha
 
 ### Dependencies
 
+Add to `requirements.txt` (create if absent):
 ```
-transformers
-huggingface_hub
+transformers>=4.40.0
+huggingface_hub>=0.22.0
 ```
 
-Model (~22MB) downloads on first run and caches in `~/.cache/huggingface/`.
+Model (~22MB) downloads on first run and caches in `~/.cache/huggingface/`. If the download fails (no network), HuggingFace raises a `OSError` with a clear message — no custom handling needed.
+
+### Data generation additions
+
+The time format variants and day name variants are additive — appended to the existing alias/variant lists in `diversify_text` and `random_weekday_alias`. No changes to generation probabilities or pattern weights.
 
 ---
 
