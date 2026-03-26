@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
+from transformers import AutoModel, AutoTokenizer
 
 
 @dataclass(frozen=True)
@@ -23,32 +24,6 @@ class EncodedRule:
     end_m: int
     polarity: int
 
-
-class CharTokenizer:
-    def __init__(self, vocab_size: int = 5000, max_len: int = 80):
-        self.vocab_size = vocab_size
-        self.max_len = max_len
-        self.pad_id = 0
-        self.unk_id = 1
-        self.char2id = {"<pad>": 0, "<unk>": 1}
-
-    def fit(self, texts: List[str]) -> None:
-        freq = {}
-        for text in texts:
-            for ch in text:
-                freq[ch] = freq.get(ch, 0) + 1
-        ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)
-        for i, (ch, _) in enumerate(ranked[: self.vocab_size - 2], start=2):
-            self.char2id[ch] = i
-
-    def encode(self, text: str) -> tuple[list[int], list[int]]:
-        ids = [self.char2id.get(ch, self.unk_id) for ch in text[: self.max_len]]
-        mask = [1] * len(ids)
-        if len(ids) < self.max_len:
-            pad_n = self.max_len - len(ids)
-            ids.extend([self.pad_id] * pad_n)
-            mask.extend([0] * pad_n)
-        return ids, mask
 
 
 def parse_hm(hm: str) -> tuple[int, int]:
@@ -86,7 +61,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 class RuleDataset(Dataset):
-    def __init__(self, rows: list[dict], tokenizer: CharTokenizer, max_rules: int = 4):
+    def __init__(self, rows: list[dict], tokenizer, max_rules: int = 4):
         self.rows = rows
         self.tokenizer = tokenizer
         self.max_rules = max_rules
@@ -129,68 +104,30 @@ class RuleDataset(Dataset):
         }
 
 
-class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.pe[:, : x.size(1), :]
-
-
 class TimeLogicFormer(nn.Module):
-    def __init__(
-        self,
-        vocab_size: int = 5000,
-        d_model: int = 128,
-        nhead: int = 2,
-        num_layers: int = 2,
-        dim_ff: int = 256,
-        max_len: int = 80,
-        dropout: float = 0.1,
-        max_rules: int = 4,
-    ):
+    def __init__(self, backbone: str, max_rules: int = 6, dropout: float = 0.1):
         super().__init__()
         self.max_rules = max_rules
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pos = SinusoidalPositionalEncoding(d_model, max_len=max_len)
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_ff,
-            dropout=dropout,
-            batch_first=True,
-            activation="gelu",
-        )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, enable_nested_tensor=False)
-        self.norm = nn.LayerNorm(d_model)
-        self.shared = nn.Sequential(nn.Linear(d_model, d_model), nn.GELU(), nn.Dropout(dropout))
-        self.count_head = nn.Linear(d_model, max_rules + 1)
-        self.weekday_head = nn.Linear(d_model, max_rules * 8)
-        self.start_h_head = nn.Linear(d_model, max_rules * 24)
-        self.start_m_head = nn.Linear(d_model, max_rules * 60)
-        self.end_h_head = nn.Linear(d_model, max_rules * 24)
-        self.end_m_head = nn.Linear(d_model, max_rules * 60)
-        self.polarity_head = nn.Linear(d_model, max_rules * 2)
+        self.backbone_model = AutoModel.from_pretrained(backbone)
+        hidden = self.backbone_model.config.hidden_size
+        self.drop = nn.Dropout(dropout)
+        self.count_head = nn.Linear(hidden, max_rules + 1)
+        self.weekday_head = nn.Linear(hidden, max_rules * 8)
+        self.start_h_head = nn.Linear(hidden, max_rules * 24)
+        self.start_m_head = nn.Linear(hidden, max_rules * 60)
+        self.end_h_head = nn.Linear(hidden, max_rules * 24)
+        self.end_m_head = nn.Linear(hidden, max_rules * 60)
+        self.polarity_head = nn.Linear(hidden, max_rules * 2)
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> dict:
-        x = self.embedding(input_ids)
-        x = self.pos(x)
-        pad_mask = None
+        out = self.backbone_model(input_ids=input_ids, attention_mask=attention_mask)
+        h = out.last_hidden_state  # (B, seq_len, hidden)
         if attention_mask is not None:
-            pad_mask = ~attention_mask.bool()
-        h = self.encoder(x, src_key_padding_mask=pad_mask)
-        if attention_mask is None:
-            pooled = h.mean(dim=1)
-        else:
             m = attention_mask.unsqueeze(-1).float()
             pooled = (h * m).sum(dim=1) / m.sum(dim=1).clamp_min(1e-6)
-        z = self.shared(self.norm(pooled))
+        else:
+            pooled = h.mean(dim=1)
+        z = self.drop(pooled)
         return {
             "count_logits": self.count_head(z),
             "weekday_logits": self.weekday_head(z).view(-1, self.max_rules, 8),
@@ -270,18 +207,18 @@ def evaluate(
     return total / batches
 
 
-def encode_text_with_tokenizer(text: str, tokenizer_data: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    char2id = tokenizer_data["char2id"]
-    max_len = int(tokenizer_data["max_len"])
-    pad_id = int(char2id["<pad>"])
-    unk_id = int(char2id["<unk>"])
-    ids = [char2id.get(ch, unk_id) for ch in text[:max_len]]
-    attention_mask = [1] * len(ids)
-    if len(ids) < max_len:
-        pad_len = max_len - len(ids)
-        ids.extend([pad_id] * pad_len)
-        attention_mask.extend([0] * pad_len)
-    return torch.tensor([ids], dtype=torch.long), torch.tensor([attention_mask], dtype=torch.long)
+def encode_text_with_tokenizer(text: str, tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode a single text string using a HuggingFace AutoTokenizer.
+    Returns (input_ids, attention_mask) each of shape (1, max_length).
+    """
+    encoding = tokenizer(
+        text,
+        max_length=128,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+    )
+    return encoding["input_ids"], encoding["attention_mask"]
 
 
 def decode_rules(outputs: dict, max_rules: int) -> list[dict]:
