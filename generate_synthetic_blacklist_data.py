@@ -127,7 +127,7 @@ def diversify_text(text: str, rng: random.Random) -> str:
                 h12 = 12
             variants = [f"{h12}:{mins}{suffix}", f"{h12}{suffix}", f"{h12} {suffix.upper()}"]
             return rng.choice(variants)
-        rewritten = re.sub(r"\b(\d{2}):(\d{2})\b", to_12h, rewritten)
+        rewritten = re.sub(r"\b(\d{1,2}):(\d{2})\b", to_12h, rewritten)
     return rewritten.strip()
 
 
