@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from train_time_logicformer import TimeLogicFormer, choose_device, decode_rules, encode_text_with_tokenizer
+from transformers import AutoTokenizer
 
 
 HTML_PAGE = """<!doctype html>
@@ -183,29 +184,23 @@ def merge_rules(parsed_rules: list[dict], model_rules: list[dict]) -> list[dict]
 
 
 class ModelService:
-    def __init__(self, checkpoint_path: Path, tokenizer_path: Path, device_arg: str, assist_mode: str):
+    def __init__(self, checkpoint_path: Path, device_arg: str, assist_mode: str):
         self.device = choose_device(device_arg)
         self.assist_mode = assist_mode
-        checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
+        checkpoint = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
         self.config = checkpoint["config"]
         self.model = TimeLogicFormer(
-            vocab_size=self.config["vocab_size"],
-            d_model=self.config["d_model"],
-            nhead=self.config["nhead"],
-            num_layers=self.config["num_layers"],
-            dim_ff=self.config["dim_ff"],
-            max_len=self.config["max_len"],
-            dropout=self.config["dropout"],
+            backbone=self.config["backbone"],
             max_rules=self.config["max_rules"],
+            dropout=self.config["dropout"],
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
-        with tokenizer_path.open("r", encoding="utf-8") as f:
-            self.tokenizer_data = json.load(f)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config["backbone"])
 
     def predict(self, text: str) -> dict:
         with torch.no_grad():
-            input_ids, attention_mask = encode_text_with_tokenizer(text, self.tokenizer_data)
+            input_ids, attention_mask = encode_text_with_tokenizer(text, self.tokenizer)
             input_ids = input_ids.to(self.device)
             attention_mask = attention_mask.to(self.device)
             outputs = self.model(input_ids, attention_mask)
@@ -274,14 +269,13 @@ def make_handler(service: ModelService):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_large/best_model.pt")
-    parser.add_argument("--tokenizer-path", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_large/tokenizer.json")
     parser.add_argument("--device", type=str, choices=["auto", "mps", "cpu", "cuda"], default="auto")
     parser.add_argument("--assist-mode", type=str, choices=["off", "auto", "strict"], default="off")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
 
-    service = ModelService(Path(args.checkpoint), Path(args.tokenizer_path), args.device, args.assist_mode)
+    service = ModelService(Path(args.checkpoint), args.device, args.assist_mode)
     handler = make_handler(service)
     server = HTTPServer((args.host, args.port), handler)
     print(f"http://{args.host}:{args.port}")
