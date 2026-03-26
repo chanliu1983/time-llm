@@ -3,33 +3,28 @@ import argparse
 from pathlib import Path
 
 import torch
+from transformers import AutoTokenizer
 
 from train_time_logicformer import TimeLogicFormer, decode_rules, encode_text_with_tokenizer
 
 
-def load_model(checkpoint_path: Path, tokenizer_path: Path, device: torch.device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+def load_model(checkpoint_path: Path, device: torch.device):
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = checkpoint["config"]
     model = TimeLogicFormer(
-        vocab_size=cfg["vocab_size"],
-        d_model=cfg["d_model"],
-        nhead=cfg["nhead"],
-        num_layers=cfg["num_layers"],
-        dim_ff=cfg["dim_ff"],
-        max_len=cfg["max_len"],
-        dropout=cfg["dropout"],
+        backbone=cfg["backbone"],
         max_rules=cfg["max_rules"],
+        dropout=cfg["dropout"],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
-    with tokenizer_path.open("r", encoding="utf-8") as f:
-        tokenizer_data = json.load(f)
-    return model, tokenizer_data, cfg["max_rules"]
+    tokenizer = AutoTokenizer.from_pretrained(cfg["backbone"])
+    return model, tokenizer, cfg["max_rules"]
 
 
-def predict(model, tokenizer_data, max_rules: int, text: str, device: torch.device):
+def predict(model, tokenizer, max_rules: int, text: str, device: torch.device):
     with torch.no_grad():
-        input_ids, attention_mask = encode_text_with_tokenizer(text, tokenizer_data)
+        input_ids, attention_mask = encode_text_with_tokenizer(text, tokenizer)
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
         outputs = model(input_ids, attention_mask)
@@ -42,24 +37,14 @@ def norm(rules):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--old-checkpoint", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_large/best_model.pt")
-    parser.add_argument("--old-tokenizer", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_large/tokenizer.json")
-    parser.add_argument("--new-checkpoint", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_diverse/best_model.pt")
-    parser.add_argument("--new-tokenizer", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_diverse/tokenizer.json")
+    parser.add_argument("--old-checkpoint", type=str, default="artifacts/best_model.pt")
+    parser.add_argument("--new-checkpoint", type=str, default="artifacts_minilm/best_model.pt")
     args = parser.parse_args()
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-    old_model, old_tok, old_max_rules = load_model(
-        Path(args.old_checkpoint),
-        Path(args.old_tokenizer),
-        device,
-    )
-    new_model, new_tok, new_max_rules = load_model(
-        Path(args.new_checkpoint),
-        Path(args.new_tokenizer),
-        device,
-    )
+    old_model, old_tok, old_max_rules = load_model(Path(args.old_checkpoint), device)
+    new_model, new_tok, new_max_rules = load_model(Path(args.new_checkpoint), device)
 
     probes = [
         (
