@@ -251,27 +251,19 @@ def to_rule_tuple(rule: dict) -> tuple[int, str, str]:
 def evaluate_effectiveness(args: argparse.Namespace) -> None:
     if not args.checkpoint:
         raise RuntimeError("checkpoint is required when mode=eval")
-    if not args.tokenizer_path:
-        raise RuntimeError("tokenizer-path is required when mode=eval")
 
     device = choose_device(args.device)
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint["config"]
     model = TimeLogicFormer(
-        vocab_size=config["vocab_size"],
-        d_model=config["d_model"],
-        nhead=config["nhead"],
-        num_layers=config["num_layers"],
-        dim_ff=config["dim_ff"],
-        max_len=config["max_len"],
-        dropout=config["dropout"],
+        backbone=config["backbone"],
         max_rules=config["max_rules"],
+        dropout=config["dropout"],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    with open(args.tokenizer_path, "r", encoding="utf-8") as f:
-        tokenizer_data = json.load(f)
+    tokenizer = AutoTokenizer.from_pretrained(config["backbone"])
 
     rows = read_jsonl(Path(args.eval_data))
     if not rows:
@@ -293,7 +285,7 @@ def evaluate_effectiveness(args: argparse.Namespace) -> None:
     with torch.no_grad():
         for row in rows:
             true_rules = row["label"]["forbidden"]
-            input_ids, attention_mask = encode_text_with_tokenizer(row["text"], tokenizer_data)
+            input_ids, attention_mask = encode_text_with_tokenizer(row["text"], tokenizer)
             input_ids = input_ids.to(device)
             attention_mask = attention_mask.to(device)
             outputs = model(input_ids, attention_mask)
