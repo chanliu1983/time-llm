@@ -191,7 +191,6 @@ class ModelService:
         self.config = checkpoint["config"]
         self.model = TimeLogicFormer(
             backbone=self.config["backbone"],
-            max_rules=self.config["max_rules"],
             dropout=self.config["dropout"],
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -200,11 +199,19 @@ class ModelService:
 
     def predict(self, text: str) -> dict:
         with torch.no_grad():
-            input_ids, attention_mask = encode_text_with_tokenizer(text, self.tokenizer)
+            input_ids, attention_mask, _ = encode_text_with_tokenizer(
+                text, self.tokenizer, max_len=int(self.config.get("max_len", 128))
+            )
             input_ids = input_ids.to(self.device)
             attention_mask = attention_mask.to(self.device)
-            outputs = self.model(input_ids, attention_mask)
-            model_rules = decode_rules(outputs, max_rules=self.config["max_rules"])
+            logits = self.model(input_ids, attention_mask)
+            model_rules = decode_rules(
+                logits,
+                input_ids,
+                attention_mask,
+                self.tokenizer,
+                max_rules=self.config["max_rules"],
+            )
         if self.assist_mode == "off":
             return {"forbidden": merge_rules([], model_rules), "source": "model"}
         parsed_rules = parse_rules_deterministic(text)

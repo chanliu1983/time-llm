@@ -2,51 +2,17 @@ import argparse
 import json
 import math
 import random
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer
 
-
-@dataclass(frozen=True)
-class EncodedRule:
-    weekday: int
-    start_h: int
-    start_m: int
-    end_h: int
-    end_m: int
-    polarity: int
-
-
-
-def parse_hm(hm: str) -> tuple[int, int]:
-    h, m = hm.split(":")
-    return int(h), int(m)
-
-
-def encode_rules(rules: list[dict], max_rules: int) -> list[EncodedRule]:
-    encoded = []
-    for item in rules[:max_rules]:
-        sh, sm = parse_hm(item["start"])
-        eh, em = parse_hm(item["end"])
-        encoded.append(
-            EncodedRule(
-                weekday=int(item["weekday"]),
-                start_h=sh,
-                start_m=sm,
-                end_h=eh,
-                end_m=em,
-                polarity=1,
-            )
-        )
-    return encoded
+from rule_builder import build_rules_from_tags
+from tagging_utils import ID2TAG, NUM_TAGS, align_char_labels_to_tokens, build_char_labels
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -54,17 +20,16 @@ def read_jsonl(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
+            if line:
+                rows.append(json.loads(line))
     return rows
 
 
 class RuleDataset(Dataset):
-    def __init__(self, rows: list[dict], tokenizer, max_rules: int = 4):
+    def __init__(self, rows: list[dict], tokenizer, max_len: int = 128):
         self.rows = rows
         self.tokenizer = tokenizer
-        self.max_rules = max_rules
+        self.max_len = max_len
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -72,95 +37,47 @@ class RuleDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.rows[idx]
         text = row["text"]
+        rules = row["label"]["forbidden"]
         encoding = self.tokenizer(
             text,
-            max_length=128,
+            max_length=self.max_len,
             padding="max_length",
             truncation=True,
+            return_offsets_mapping=True,
             return_tensors="pt",
         )
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
-        rules = encode_rules(row["label"]["forbidden"], self.max_rules)
-        count = len(rules)
-
-        weekday = [0] * self.max_rules
-        start_h = [0] * self.max_rules
-        start_m = [0] * self.max_rules
-        end_h = [0] * self.max_rules
-        end_m = [0] * self.max_rules
-        polarity = [0] * self.max_rules
-
-        for i, r in enumerate(rules):
-            weekday[i] = r.weekday
-            start_h[i] = r.start_h
-            start_m[i] = r.start_m
-            end_h[i] = r.end_h
-            end_m[i] = r.end_m
-            polarity[i] = r.polarity
-
+        offsets = encoding["offset_mapping"].squeeze(0).tolist()
+        char_labels = build_char_labels(text, rules)
+        labels = align_char_labels_to_tokens(offsets, char_labels, attention_mask.tolist())
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "count": torch.tensor(count, dtype=torch.long),
-            "weekday": torch.tensor(weekday, dtype=torch.long),
-            "start_h": torch.tensor(start_h, dtype=torch.long),
-            "start_m": torch.tensor(start_m, dtype=torch.long),
-            "end_h": torch.tensor(end_h, dtype=torch.long),
-            "end_m": torch.tensor(end_m, dtype=torch.long),
-            "polarity": torch.tensor(polarity, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
         }
 
 
-class TimeLogicFormer(nn.Module):
-    def __init__(self, backbone: str, max_rules: int = 6, dropout: float = 0.1):
+class TimeLogicTagger(nn.Module):
+    def __init__(self, backbone: str, dropout: float = 0.1):
         super().__init__()
-        self.max_rules = max_rules
         self.backbone_model = AutoModel.from_pretrained(backbone)
         hidden = self.backbone_model.config.hidden_size
-        self.drop = nn.Dropout(dropout)
-        self.count_head = nn.Linear(hidden, max_rules + 1)
-        self.weekday_head = nn.Linear(hidden, max_rules * 8)
-        self.start_h_head = nn.Linear(hidden, max_rules * 24)
-        self.start_m_head = nn.Linear(hidden, max_rules * 60)
-        self.end_h_head = nn.Linear(hidden, max_rules * 24)
-        self.end_m_head = nn.Linear(hidden, max_rules * 60)
-        self.polarity_head = nn.Linear(hidden, max_rules * 2)
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden, NUM_TAGS)
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> dict:
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         out = self.backbone_model(input_ids=input_ids, attention_mask=attention_mask)
-        h = out.last_hidden_state  # (B, seq_len, hidden)
-        if attention_mask is not None:
-            m = attention_mask.unsqueeze(-1).float()
-            pooled = (h * m).sum(dim=1) / m.sum(dim=1).clamp_min(1e-6)
-        else:
-            pooled = h.mean(dim=1)
-        z = self.drop(pooled)
-        return {
-            "count_logits": self.count_head(z),
-            "weekday_logits": self.weekday_head(z).view(-1, self.max_rules, 8),
-            "start_h_logits": self.start_h_head(z).view(-1, self.max_rules, 24),
-            "start_m_logits": self.start_m_head(z).view(-1, self.max_rules, 60),
-            "end_h_logits": self.end_h_head(z).view(-1, self.max_rules, 24),
-            "end_m_logits": self.end_m_head(z).view(-1, self.max_rules, 60),
-            "polarity_logits": self.polarity_head(z).view(-1, self.max_rules, 2),
-        }
+        h = self.dropout(out.last_hidden_state)
+        return self.classifier(h)
 
 
-def compute_loss(outputs: dict, batch: dict, max_rules: int, label_smoothing: float = 0.0) -> torch.Tensor:
-    loss = F.cross_entropy(outputs["count_logits"], batch["count"], label_smoothing=label_smoothing)
-    count = batch["count"]
-    for r in range(max_rules):
-        active = count > r
-        if active.any():
-            idx = active.nonzero(as_tuple=True)[0]
-            loss = loss + F.cross_entropy(outputs["weekday_logits"][idx, r], batch["weekday"][idx, r], label_smoothing=label_smoothing)
-            loss = loss + F.cross_entropy(outputs["start_h_logits"][idx, r], batch["start_h"][idx, r], label_smoothing=label_smoothing)
-            loss = loss + F.cross_entropy(outputs["start_m_logits"][idx, r], batch["start_m"][idx, r], label_smoothing=label_smoothing)
-            loss = loss + F.cross_entropy(outputs["end_h_logits"][idx, r], batch["end_h"][idx, r], label_smoothing=label_smoothing)
-            loss = loss + F.cross_entropy(outputs["end_m_logits"][idx, r], batch["end_m"][idx, r], label_smoothing=label_smoothing)
-            loss = loss + F.cross_entropy(outputs["polarity_logits"][idx, r], batch["polarity"][idx, r], label_smoothing=label_smoothing)
-    return loss
+TimeLogicFormer = TimeLogicTagger
+
+
+def compute_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    return loss_fn(logits.view(-1, NUM_TAGS), labels.view(-1))
 
 
 def choose_device(device_arg: str) -> torch.device:
@@ -192,21 +109,15 @@ def split_rows(rows: list[dict], valid_ratio: float, rng: random.Random) -> tupl
     return train, valid
 
 
-def evaluate(
-    model: TimeLogicFormer,
-    loader: DataLoader,
-    device: torch.device,
-    max_rules: int,
-    label_smoothing: float = 0.0,
-) -> float:
+def evaluate(model: TimeLogicTagger, loader: DataLoader, device: torch.device) -> float:
     model.eval()
     total = 0.0
     batches = 0
     with torch.no_grad():
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(batch["input_ids"], batch["attention_mask"])
-            loss = compute_loss(outputs, batch, max_rules=max_rules, label_smoothing=label_smoothing)
+            logits = model(batch["input_ids"], batch["attention_mask"])
+            loss = compute_loss(logits, batch["labels"])
             total += float(loss.item())
             batches += 1
     model.train()
@@ -215,33 +126,34 @@ def evaluate(
     return total / batches
 
 
-def encode_text_with_tokenizer(text: str, tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
-    """Encode a single text string using a HuggingFace AutoTokenizer.
-    Returns (input_ids, attention_mask) each of shape (1, max_length).
-    """
+def encode_text_with_tokenizer(text: str, tokenizer, max_len: int = 128) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     encoding = tokenizer(
         text,
-        max_length=128,
+        max_length=max_len,
         padding="max_length",
         truncation=True,
+        return_offsets_mapping=True,
         return_tensors="pt",
     )
-    return encoding["input_ids"], encoding["attention_mask"]
+    return encoding["input_ids"], encoding["attention_mask"], encoding["offset_mapping"]
 
 
-def decode_rules(outputs: dict, max_rules: int) -> list[dict]:
-    count = int(outputs["count_logits"].argmax(dim=-1).item())
-    count = min(max(count, 0), max_rules)
-    rules = []
-    for idx in range(count):
-        weekday = int(outputs["weekday_logits"][0, idx].argmax(dim=-1).item())
-        weekday = min(max(weekday, 1), 7)
-        start_h = int(outputs["start_h_logits"][0, idx].argmax(dim=-1).item())
-        start_m = int(outputs["start_m_logits"][0, idx].argmax(dim=-1).item())
-        end_h = int(outputs["end_h_logits"][0, idx].argmax(dim=-1).item())
-        end_m = int(outputs["end_m_logits"][0, idx].argmax(dim=-1).item())
-        rules.append({"weekday": weekday, "start": f"{start_h:02d}:{start_m:02d}", "end": f"{end_h:02d}:{end_m:02d}"})
-    return rules
+def decode_rules(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor, tokenizer, max_rules: int = 6) -> list[dict]:
+    pred_ids = logits.argmax(dim=-1)[0].detach().cpu().tolist()
+    ids = input_ids[0].detach().cpu().tolist()
+    mask = attention_mask[0].detach().cpu().tolist()
+    tokens = tokenizer.convert_ids_to_tokens(ids)
+    tags = []
+    clean_tokens = []
+    for tok, tid, m in zip(tokens, pred_ids, mask):
+        if m == 0:
+            continue
+        if tok in (tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token):
+            continue
+        clean_tokens.append(tok)
+        tags.append(ID2TAG.get(tid, "O"))
+    rules = build_rules_from_tags(clean_tokens, tags)
+    return rules[:max_rules]
 
 
 def to_rule_tuple(rule: dict) -> tuple[int, str, str]:
@@ -255,15 +167,15 @@ def evaluate_effectiveness(args: argparse.Namespace) -> None:
     device = choose_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint["config"]
-    model = TimeLogicFormer(
+    model = TimeLogicTagger(
         backbone=config["backbone"],
-        max_rules=config["max_rules"],
         dropout=config["dropout"],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(config["backbone"])
+    tokenizer = AutoTokenizer.from_pretrained(config["backbone"], use_fast=True)
+    max_len = int(config.get("max_len", 128))
 
     rows = read_jsonl(Path(args.eval_data))
     if not rows:
@@ -285,11 +197,11 @@ def evaluate_effectiveness(args: argparse.Namespace) -> None:
     with torch.no_grad():
         for row in rows:
             true_rules = row["label"]["forbidden"]
-            input_ids, attention_mask = encode_text_with_tokenizer(row["text"], tokenizer)
+            input_ids, attention_mask, _ = encode_text_with_tokenizer(row["text"], tokenizer, max_len=max_len)
             input_ids = input_ids.to(device)
             attention_mask = attention_mask.to(device)
-            outputs = model(input_ids, attention_mask)
-            pred_rules = decode_rules(outputs, max_rules=config["max_rules"])
+            logits = model(input_ids, attention_mask)
+            pred_rules = decode_rules(logits, input_ids, attention_mask, tokenizer, max_rules=config["max_rules"])
 
             if len(pred_rules) == len(true_rules):
                 count_ok += 1
@@ -350,18 +262,16 @@ def train(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
     train_rows, valid_rows = split_rows(rows, args.valid_ratio, rng)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.backbone)
-
-    train_ds = RuleDataset(train_rows, tokenizer, max_rules=args.max_rules)
-    valid_ds = RuleDataset(valid_rows, tokenizer, max_rules=args.max_rules)
+    tokenizer = AutoTokenizer.from_pretrained(args.backbone, use_fast=True)
+    train_ds = RuleDataset(train_rows, tokenizer, max_len=args.max_len)
+    valid_ds = RuleDataset(valid_rows, tokenizer, max_len=args.max_len)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False)
 
     device = choose_device(args.device)
-    model = TimeLogicFormer(
+    model = TimeLogicTagger(
         backbone=args.backbone,
-        max_rules=args.max_rules,
         dropout=args.dropout,
     ).to(device)
 
@@ -394,8 +304,8 @@ def train(args: argparse.Namespace) -> None:
         batches = 0
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(batch["input_ids"], batch["attention_mask"])
-            loss = compute_loss(outputs, batch, max_rules=args.max_rules, label_smoothing=args.label_smoothing)
+            logits = model(batch["input_ids"], batch["attention_mask"])
+            loss = compute_loss(logits, batch["labels"])
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
@@ -404,7 +314,7 @@ def train(args: argparse.Namespace) -> None:
             total += float(loss.item())
             batches += 1
         train_loss = total / max(1, batches)
-        valid_loss = evaluate(model, valid_loader, device, max_rules=args.max_rules, label_smoothing=args.label_smoothing)
+        valid_loss = evaluate(model, valid_loader, device)
         print(f"epoch={epoch} train_loss={train_loss:.4f} valid_loss={valid_loss:.4f}")
         if valid_loss < best_valid:
             best_valid = valid_loss
@@ -415,6 +325,8 @@ def train(args: argparse.Namespace) -> None:
                         "backbone": args.backbone,
                         "max_rules": args.max_rules,
                         "dropout": args.dropout,
+                        "max_len": args.max_len,
+                        "num_tags": NUM_TAGS,
                     },
                 },
                 best_path,
@@ -435,13 +347,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--backbone", type=str, default="sentence-transformers/all-MiniLM-L6-v2")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--max-len", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--encoder-lr", type=float, default=2e-5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--valid-ratio", type=float, default=0.1)
     p.add_argument("--max-rules", type=int, default=6)
     p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--warmup-ratio", type=float, default=0.06)
     return p

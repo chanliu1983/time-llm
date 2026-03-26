@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+tests/__pycache__/
+*.pyc
+
+artifacts*/
+
+synthetic_*.jsonl
+eval_*.jsonl

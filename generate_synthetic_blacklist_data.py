@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List
 
+from tagging_utils import build_char_labels
 
 WEEKDAYS = [
     (1, "Monday"),
@@ -255,6 +256,29 @@ def normalize(sample: dict) -> dict:
     return {"text": sample["text"], "label": {"forbidden": forbidden}}
 
 
+def build_token_supervision(text: str, forbidden: List[dict]) -> dict:
+    tokens = []
+    spans = []
+    for m in re.finditer(r"\S+", text):
+        tokens.append(m.group(0))
+        spans.append((m.start(), m.end()))
+    char_labels = build_char_labels(text, forbidden)
+    tags = []
+    prev = "O"
+    for s, e in spans:
+        tag = "O"
+        for c in char_labels[s:e]:
+            if c != "O":
+                tag = c
+                break
+        if tag.startswith("I-"):
+            base = tag[2:]
+            tag = f"I-{base}" if prev == base else f"B-{base}"
+        prev = tag[2:] if tag != "O" else "O"
+        tags.append(tag)
+    return {"tokens": tokens, "tags": tags}
+
+
 def parse_ratios(ratios_text: str) -> Dict[str, float]:
     if not ratios_text.strip():
         ratios = dict(DEFAULT_RATIOS)
@@ -313,6 +337,7 @@ def main() -> None:
     parser.add_argument("--output", type=str, default="synthetic_blacklist.jsonl")
     parser.add_argument("--mode", type=str, choices=["random", "balanced"], default="random")
     parser.add_argument("--ratios", type=str, default="")
+    parser.add_argument("--emit-token-labels", action="store_true")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -323,10 +348,14 @@ def main() -> None:
             schedule = build_pattern_schedule(args.num_samples, rng, ratios)
             for name in schedule:
                 sample = normalize(generate_sample(rng, pattern_name=name))
+                if args.emit_token_labels:
+                    sample["token_supervision"] = build_token_supervision(sample["text"], sample["label"]["forbidden"])
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
         else:
             for _ in range(args.num_samples):
                 sample = normalize(generate_sample(rng))
+                if args.emit_token_labels:
+                    sample["token_supervision"] = build_token_supervision(sample["text"], sample["label"]["forbidden"])
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
 

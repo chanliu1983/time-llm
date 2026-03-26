@@ -13,22 +13,21 @@ def load_model(checkpoint_path: Path, device: torch.device):
     cfg = checkpoint["config"]
     model = TimeLogicFormer(
         backbone=cfg["backbone"],
-        max_rules=cfg["max_rules"],
         dropout=cfg["dropout"],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(cfg["backbone"])
-    return model, tokenizer, cfg["max_rules"]
+    tokenizer = AutoTokenizer.from_pretrained(cfg["backbone"], use_fast=True)
+    return model, tokenizer, cfg["max_rules"], int(cfg.get("max_len", 128))
 
 
-def predict(model, tokenizer, max_rules: int, text: str, device: torch.device):
+def predict(model, tokenizer, max_rules: int, max_len: int, text: str, device: torch.device):
     with torch.no_grad():
-        input_ids, attention_mask = encode_text_with_tokenizer(text, tokenizer)
+        input_ids, attention_mask, _ = encode_text_with_tokenizer(text, tokenizer, max_len=max_len)
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
-        outputs = model(input_ids, attention_mask)
-        return decode_rules(outputs, max_rules=max_rules)
+        logits = model(input_ids, attention_mask)
+        return decode_rules(logits, input_ids, attention_mask, tokenizer, max_rules=max_rules)
 
 
 def norm(rules):
@@ -43,8 +42,8 @@ def main() -> None:
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-    old_model, old_tok, old_max_rules = load_model(Path(args.old_checkpoint), device)
-    new_model, new_tok, new_max_rules = load_model(Path(args.new_checkpoint), device)
+    old_model, old_tok, old_max_rules, old_max_len = load_model(Path(args.old_checkpoint), device)
+    new_model, new_tok, new_max_rules, new_max_len = load_model(Path(args.new_checkpoint), device)
 
     probes = [
         (
@@ -78,8 +77,8 @@ def main() -> None:
     sample_outputs = []
 
     for text, label in probes:
-        old_pred = norm(predict(old_model, old_tok, old_max_rules, text, device))
-        new_pred = norm(predict(new_model, new_tok, new_max_rules, text, device))
+        old_pred = norm(predict(old_model, old_tok, old_max_rules, old_max_len, text, device))
+        new_pred = norm(predict(new_model, new_tok, new_max_rules, new_max_len, text, device))
         gold = norm(label)
         old_exact += int(old_pred == gold)
         new_exact += int(new_pred == gold)
