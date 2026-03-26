@@ -72,7 +72,15 @@ class RuleDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.rows[idx]
         text = row["text"]
-        ids, mask = self.tokenizer.encode(text)
+        encoding = self.tokenizer(
+            text,
+            max_length=128,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        input_ids = encoding["input_ids"].squeeze(0)
+        attention_mask = encoding["attention_mask"].squeeze(0)
         rules = encode_rules(row["label"]["forbidden"], self.max_rules)
         count = len(rules)
 
@@ -92,8 +100,8 @@ class RuleDataset(Dataset):
             polarity[i] = r.polarity
 
         return {
-            "input_ids": torch.tensor(ids, dtype=torch.long),
-            "attention_mask": torch.tensor(mask, dtype=torch.long),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
             "count": torch.tensor(count, dtype=torch.long),
             "weekday": torch.tensor(weekday, dtype=torch.long),
             "start_h": torch.tensor(start_h, dtype=torch.long),

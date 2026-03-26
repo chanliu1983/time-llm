@@ -51,3 +51,16 @@ def test_sinusoidal_pe_removed():
     import train_time_logicformer as m
     assert not hasattr(m, "SinusoidalPositionalEncoding"), \
         "SinusoidalPositionalEncoding should be removed"
+
+
+def test_rule_dataset_item_shape():
+    from train_time_logicformer import RuleDataset
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(BACKBONE)
+    rows = [{"text": "block Monday all day", "label": {"forbidden": [{"weekday": 1, "start": "00:00", "end": "23:59"}]}}]
+    ds = RuleDataset(rows, tokenizer, max_rules=4)
+    item = ds[0]
+    assert item["input_ids"].shape == (128,)
+    assert item["attention_mask"].shape == (128,)
+    assert item["count"].item() == 1
+    assert item["weekday"][0].item() == 1
