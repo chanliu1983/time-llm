@@ -71,13 +71,13 @@ def rule_to_json(rule: Rule) -> dict:
 
 def random_weekday_alias(name: str, rng: random.Random) -> str:
     aliases = {
-        "Monday": ["Monday", "Mon"],
-        "Tuesday": ["Tuesday", "Tue"],
-        "Wednesday": ["Wednesday", "Wed"],
-        "Thursday": ["Thursday", "Thu"],
-        "Friday": ["Friday", "Fri"],
-        "Saturday": ["Saturday", "Sat"],
-        "Sunday": ["Sunday", "Sun"],
+        "Monday": ["Monday", "Mon", "Mon.", "monday", "every Monday", "on Mondays"],
+        "Tuesday": ["Tuesday", "Tue", "Tues", "tuesday", "every Tuesday"],
+        "Wednesday": ["Wednesday", "Wed", "Weds", "wednesday", "every Wednesday"],
+        "Thursday": ["Thursday", "Thu", "Thurs", "thursday", "every Thursday"],
+        "Friday": ["Friday", "Fri", "Fri.", "friday", "every Friday"],
+        "Saturday": ["Saturday", "Sat", "Sat.", "saturday", "every Saturday"],
+        "Sunday": ["Sunday", "Sun", "Sun.", "sunday", "every Sunday"],
     }
     return rng.choice(aliases.get(name, [name]))
 
@@ -116,6 +116,18 @@ def diversify_text(text: str, rng: random.Random) -> str:
         rewritten = "  " + rewritten + "  "
     if rng.random() < 0.1:
         rewritten = rewritten.replace("forbid", "forbbid").replace("disallow", "disalow")
+    # 12h time format variants
+    if rng.random() < 0.3:
+        def to_12h(m):
+            h = int(m.group(1))
+            mins = m.group(2)
+            suffix = "am" if h < 12 else "pm"
+            h12 = h if h <= 12 else h - 12
+            if h12 == 0:
+                h12 = 12
+            variants = [f"{h12}:{mins}{suffix}", f"{h12}{suffix}", f"{h12} {suffix.upper()}"]
+            return rng.choice(variants)
+        rewritten = re.sub(r"\b(\d{2}):(\d{2})\b", to_12h, rewritten)
     return rewritten.strip()
 
 
