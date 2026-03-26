@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from tagging_utils import parse_day, parse_time
 
@@ -35,31 +35,61 @@ def _join_wordpieces(tokens: List[str]) -> str:
 
 
 def build_rules(spans: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    days: List[int] = []
-    starts: List[str] = []
-    ends: List[str] = []
     polarity = 1
+    active_days: List[int] = []
+    pending_starts: List[str] = []
+    rules: List[Dict[str, object]] = []
+
+    def add_rule(day: int, start: str, end: str):
+        rules.append({"weekday": day, "start": start, "end": end, "polarity": polarity})
 
     for span in spans:
         span_type = str(span["type"])
         raw_text = _join_wordpieces(list(span["tokens"]))
-        if span_type == "DAY":
-            parsed = parse_day(raw_text)
-            if parsed is not None:
-                days.append(parsed)
-        elif span_type == "START":
-            parsed = parse_time(raw_text)
-            if parsed is not None:
-                starts.append(parsed)
-        elif span_type == "END":
-            parsed = parse_time(raw_text)
-            if parsed is not None:
-                ends.append(parsed)
-        elif span_type == "POLARITY":
-            polarity = 1
 
-    n = min(len(days), len(starts), len(ends))
-    rules = [{"weekday": days[i], "start": starts[i], "end": ends[i], "polarity": polarity} for i in range(n)]
+        if span_type == "POLARITY":
+            polarity = 1
+            continue
+
+        if span_type == "DAY":
+            parsed_day = parse_day(raw_text)
+            if parsed_day is not None and parsed_day not in active_days:
+                active_days.append(parsed_day)
+            continue
+
+        if span_type == "ALLDAY":
+            if active_days:
+                for day in active_days:
+                    add_rule(day, "00:00", "23:59")
+                pending_starts.clear()
+            continue
+
+        if span_type == "START":
+            parsed_start = parse_time(raw_text)
+            if parsed_start is not None:
+                pending_starts.append(parsed_start)
+            continue
+
+        if span_type == "END":
+            parsed_end = parse_time(raw_text)
+            if parsed_end is None or not active_days:
+                continue
+            if pending_starts:
+                start_time = pending_starts.pop(0)
+            else:
+                start_time = "00:00"
+            for day in active_days:
+                add_rule(day, start_time, parsed_end)
+            continue
+
+    if active_days and pending_starts:
+        for start_time in pending_starts:
+            for day in active_days:
+                add_rule(day, start_time, "23:59")
+    elif active_days and not rules:
+        for day in active_days:
+            add_rule(day, "00:00", "23:59")
+
     unique = {(r["weekday"], r["start"], r["end"], r["polarity"]): r for r in rules}
     return [unique[k] for k in sorted(unique.keys())]
 

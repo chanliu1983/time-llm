@@ -94,11 +94,11 @@ Provides:
 - prediction API at `/predict`
 - metadata at `/meta`
 
-Inference modes:
+Inference pipeline:
 
-- `assist-mode off`: model-only
-- `assist-mode auto`: parser assist only when useful
-- `assist-mode strict`: parser-first for deterministic normalization
+- MiniLM token tagging (`DAY/START/END/ALLDAY/POLARITY`)
+- deterministic rule builder
+- strict JSON output
 
 ---
 
@@ -143,7 +143,6 @@ python3 train_time_logicformer.py \
   --mode eval \
   --eval-data eval_balanced_ultra.jsonl \
   --checkpoint artifacts_mps_ultra/best_model.pt \
-  --tokenizer-path artifacts_mps_ultra/tokenizer.json \
   --device mps
 ```
 
@@ -152,9 +151,7 @@ python3 train_time_logicformer.py \
 ```bash
 python3 simple_ui_server.py \
   --checkpoint artifacts_mps_ultra/best_model.pt \
-  --tokenizer-path artifacts_mps_ultra/tokenizer.json \
   --device mps \
-  --assist-mode off \
   --host 0.0.0.0 \
   --port 8008
 ```
@@ -165,5 +162,4 @@ Open: `http://127.0.0.1:8008/`
 
 ## Current direction
 
-The project is focused on improving true model generalization to unseen phrasing, not only deterministic parsing.  
-That is why model-only evaluation (`assist-mode off`) remains the primary quality gate.
+The project uses a two-stage structure: model tagging for semantic understanding, then deterministic rule building for stability and valid JSON.

@@ -10,7 +10,9 @@ TAG2ID = {
     "I-START": 4,
     "B-END": 5,
     "I-END": 6,
-    "B-POLARITY": 7,
+    "B-ALLDAY": 7,
+    "I-ALLDAY": 8,
+    "B-POLARITY": 9,
 }
 
 ID2TAG = {v: k for k, v in TAG2ID.items()}
@@ -36,6 +38,13 @@ POLARITY_TERMS = [
     "prohibited",
     "not allowed",
     "no access",
+]
+
+ALLDAY_TERMS = [
+    "all day",
+    "whole day",
+    "entire day",
+    "full day",
 ]
 
 
@@ -70,6 +79,10 @@ def to_hhmm_from_12h(text: str) -> str | None:
 
 def parse_time(text: str) -> str | None:
     raw = text.strip().lower()
+    if raw == "noon":
+        return "12:00"
+    if raw == "midnight":
+        return "00:00"
     match24 = re.fullmatch(r"(\d{1,2}):(\d{2})", raw)
     if match24:
         h = int(match24.group(1))
@@ -119,8 +132,13 @@ def build_char_labels(text: str, rules: List[dict]) -> List[str]:
             s, e = m.span()
             if s < e:
                 labels[s] = "B-POLARITY"
+    for term in ALLDAY_TERMS:
+        for m in re.finditer(re.escape(term), text.lower()):
+            s, e = m.span()
+            if s < e:
+                labels[s] = "B-ALLDAY"
                 for i in range(s + 1, e):
-                    labels[i] = "I-END"
+                    labels[i] = "I-ALLDAY"
 
     for rule in rules:
         day = int(rule["weekday"])
@@ -149,6 +167,14 @@ def build_char_labels(text: str, rules: List[dict]) -> List[str]:
             for i in range(s + 1, e):
                 labels[i] = "I-END"
             used.append((s, e))
+        if start == "00:00" and end == "23:59":
+            allday_match = find_non_overlapping(text, ALLDAY_TERMS, used)
+            if allday_match:
+                s, e = allday_match
+                labels[s] = "B-ALLDAY"
+                for i in range(s + 1, e):
+                    labels[i] = "I-ALLDAY"
+                used.append((s, e))
 
     return labels
 

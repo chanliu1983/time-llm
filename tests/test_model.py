@@ -54,8 +54,9 @@ import tempfile, pathlib
 
 def test_checkpoint_save_and_load():
     from train_time_logicformer import TimeLogicTagger
+    from tagging_utils import NUM_TAGS
     model = TimeLogicTagger(backbone=BACKBONE)
-    config = {"backbone": BACKBONE, "max_rules": 6, "dropout": 0.1, "max_len": 128, "num_tags": 8}
+    config = {"backbone": BACKBONE, "max_rules": 6, "dropout": 0.1, "max_len": 128, "num_tags": NUM_TAGS}
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / "model.pt"
         torch.save({"model_state_dict": model.state_dict(), "config": config}, path)

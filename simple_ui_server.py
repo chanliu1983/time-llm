@@ -33,7 +33,6 @@ HTML_PAGE = """<!doctype html>
   <div class="row">
     <span class="badge" id="device">device: loading</span>
     <span class="badge" id="model">model: loading</span>
-    <span class="badge" id="assist">assist: loading</span>
   </div>
   <textarea id="text">Forbid access on Tuesday from 03:00 to 04:00 and block Wednesday all day.</textarea>
   <br />
@@ -45,7 +44,6 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       document.getElementById('device').innerText = 'device: ' + data.device;
       document.getElementById('model').innerText = 'max_rules: ' + data.max_rules;
-      document.getElementById('assist').innerText = 'assist: ' + data.assist_mode;
     }
     async function runPredict() {
       const text = document.getElementById('text').value;
@@ -184,9 +182,8 @@ def merge_rules(parsed_rules: list[dict], model_rules: list[dict]) -> list[dict]
 
 
 class ModelService:
-    def __init__(self, checkpoint_path: Path, device_arg: str, assist_mode: str):
+    def __init__(self, checkpoint_path: Path, device_arg: str):
         self.device = choose_device(device_arg)
-        self.assist_mode = assist_mode
         checkpoint = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
         self.config = checkpoint["config"]
         self.model = TimeLogicFormer(
@@ -212,17 +209,10 @@ class ModelService:
                 self.tokenizer,
                 max_rules=self.config["max_rules"],
             )
-        if self.assist_mode == "off":
-            return {"forbidden": merge_rules([], model_rules), "source": "model"}
-        parsed_rules = parse_rules_deterministic(text)
-        if self.assist_mode == "strict":
-            return {"forbidden": merge_rules(parsed_rules, model_rules), "source": "parser_or_model"}
-        if parsed_rules:
-            return {"forbidden": merge_rules(parsed_rules, model_rules), "source": "parser_or_model"}
         return {"forbidden": merge_rules([], model_rules), "source": "model"}
 
     def meta(self) -> dict:
-        return {"device": str(self.device), "max_rules": int(self.config["max_rules"]), "assist_mode": self.assist_mode}
+        return {"device": str(self.device), "max_rules": int(self.config["max_rules"])}
 
 
 def make_handler(service: ModelService):
@@ -277,12 +267,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="/Users/leiliu/Documents/time-llm/artifacts_mps_large/best_model.pt")
     parser.add_argument("--device", type=str, choices=["auto", "mps", "cpu", "cuda"], default="auto")
-    parser.add_argument("--assist-mode", type=str, choices=["off", "auto", "strict"], default="off")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
 
-    service = ModelService(Path(args.checkpoint), args.device, args.assist_mode)
+    service = ModelService(Path(args.checkpoint), args.device)
     handler = make_handler(service)
     server = HTTPServer((args.host, args.port), handler)
     print(f"http://{args.host}:{args.port}")
